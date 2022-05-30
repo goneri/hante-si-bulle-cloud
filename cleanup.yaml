@@ -1,0 +1,55 @@
+---
+# Goals
+# - avoid all the _info calls
+# - do not delete all the resources
+
+- hosts: localhost
+  vars:
+    target_cloud: ovh-perso
+  tasks:
+
+  - name: Delete the keypair
+    openstack.cloud.keypair:
+      cloud: "{{ target_cloud }}"
+      state: absent
+      name: goneri
+
+  - name: Delete the security group rule (TCP)
+    openstack.cloud.security_group_rule:
+      cloud: "{{ target_cloud }}"
+      state: absent
+      security_group: vpn
+      protocol: tcp
+      port_range_min: 22
+      port_range_max: 22
+      remote_ip_prefix: 0.0.0.0/0
+
+  - name: Delete the security group rule (UDP)
+    openstack.cloud.security_group_rule:
+      cloud: "{{ target_cloud }}"
+      security_group: vpn
+      protocol: udp
+      port_range_min: 51820
+      port_range_max: 51820
+      remote_ip_prefix: 0.0.0.0/0
+      
+  - name: Delete the vpn secgroup
+    openstack.cloud.security_group:
+      cloud: "{{ target_cloud }}"
+      state: absent
+      name: vpn
+
+#  - name: upload the image
+#    openstack.cloud.image:
+#      name: openbsd 7.0
+#      container_format: bare
+#      disk_format: qcow2
+#      state: present
+#      filename: /home/goneri/Downloads/openbsd-7.0.qcow2
+#    ignore_errors: true
+
+  - name: Delete the the server
+    openstack.cloud.server:
+      cloud: "{{ target_cloud }}"
+      name: vpn-vm
+      state: absent

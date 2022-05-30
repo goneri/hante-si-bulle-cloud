@@ -1,0 +1,83 @@
+---
+# Goals
+# - avoid all the _info calls
+# - do not delete all the resources
+
+- hosts: localhost
+  vars:
+    target_cloud: ovh-perso
+  tasks:
+
+  - name: Create the keypair
+    openstack.cloud.keypair:
+      cloud: "{{ target_cloud }}"
+      state: present
+      name: goneri
+      public_key_file: /home/goneri/.ssh/id_ecdsa.pub
+
+  - name: Create vpn secgroup
+    openstack.cloud.security_group:
+      cloud: "{{ target_cloud }}"
+      state: present
+      name: vpn
+      description: security group for vpn servers
+
+  - openstack.cloud.security_group_rule:
+      cloud: "{{ target_cloud }}"
+      security_group: vpn
+      protocol: tcp
+      port_range_min: 22
+      port_range_max: 22
+      remote_ip_prefix: 0.0.0.0/0
+
+  - openstack.cloud.security_group_rule:
+      cloud: "{{ target_cloud }}"
+      security_group: vpn
+      protocol: udp
+      port_range_min: 51820
+      port_range_max: 51820
+      remote_ip_prefix: 0.0.0.0/0
+      
+#  - name: upload the image
+#    openstack.cloud.image:
+#      name: openbsd 7.0
+#      container_format: bare
+#      disk_format: qcow2
+#      state: present
+#      filename: /home/goneri/Downloads/openbsd-7.0.qcow2
+#    ignore_errors: true
+
+  - name: create the server
+    openstack.cloud.server:
+      cloud: "{{ target_cloud }}"
+      name: vpn-vm
+      user_data: "{{lookup('file', 'user_data') }}"
+      key_name: goneri
+      image: openbsd 6.9
+      flavor_ram: 1024
+      # flavor: v3-starter-1
+      # network: public
+      network: Ext-Net
+      security_groups:
+        - vpn
+      config_drive: true
+    register: vpn_vm
+  - set_fact:
+      vm_ip: "{{ vpn_vm.server.accessIPv4 }}"
+  - name: Add my_vm in the inventory
+    add_host:
+      hostname: vm
+      ansible_ssh_host: '{{ vm_ip }}'
+      ansible_ssh_extra_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+      ansible_ssh_private_key_file: ~/.ssh/id_ecdsa
+      ansible_python_interpreter: "/usr/local/bin/python3"
+  - name: Wait for system to become reachable
+    wait_for_connection:
+    delegate_to: vm
+  - name: Call uname
+    command: uname -a
+    delegate_to: vm
+  - name: Ensure sudo and network work fine
+    command: /sbin/ping -c 1 google.com
+    become: true
+    delegate_to: vm
