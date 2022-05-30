@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
+import argparse
 import asyncio
 import json
+from pathlib import Path
 import re
 import subprocess
 
@@ -68,12 +70,14 @@ async def run_playbook(playbook):
     await asyncio.wait(tl)
 
 
-async def main():
-    with open("playbook.yaml", "r") as fd:
-        playbooks = YAML().load(fd.read())
+async def main(playbook_path):
+    playbooks = YAML().load(playbook_path.open().read())
 
     for playbook in playbooks:
         await run_playbook(playbook)
 
 
-asyncio.run(main())
+parser = argparse.ArgumentParser()
+parser.add_argument("playbook_path", type=Path, help="Path of the playbook")
+args = parser.parse_args()
+asyncio.run(main(playbook_path=args.playbook_path))
