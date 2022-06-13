@@ -63,7 +63,7 @@ def load_module(module_name):
 
 
 def find_undef_variable_in_jinja(jinja, task_vars):
-
+    assert isinstance(task_vars, dict)
     loader = DataLoader()
 
     vars_no_pending_task = {
