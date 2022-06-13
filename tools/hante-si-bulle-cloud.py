@@ -353,7 +353,9 @@ async def run_playbook(playbook):
             # TODO
             continue
         if module in ("pause", "ansible.builtin.pause"):
-            t = loop.create_task(asyncio.sleep(5))
+            seconds = task.get("seconds", 0)
+            minutes = task.get("minutes", 0)
+            t = loop.create_task(asyncio.sleep(seconds + minutes * 60))
             tl.append(t)
             if "register" in task:
                 scoped_vars[task["register"]] = t
