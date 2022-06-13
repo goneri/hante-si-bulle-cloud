@@ -249,7 +249,7 @@ async def run_task(task, module=None, task_vars=None):
     print(f"✨ {cmd_args}")
     output = await run_ansible(cmd_args)
     # tmp_file.unlink()
-    return output
+    return None, output
 
 
 def import_tasks_file(task_file):
@@ -302,7 +302,7 @@ async def create_task(name, func, kwargs, task_vars=None, when=None):
             await wait_for_requirements(add_jinja_brackets(when), task_vars)
             print(f"▶️ Done waiting for: {when} [{name}]")
         print(f"- task starting - {kwargs} [{name}]")
-        ret = await func(**kwargs)
+        _, ret = await func(**kwargs)
         print(f"- task done - {ret} [{name}]")
         return ret
 
@@ -374,7 +374,7 @@ async def run_playbook(playbook):
             print(f"args: {args}")
             t = await create_task(
                 name,
-                pymod.main,
+                pymod.amain,
                 kwargs={"params": args},
                 task_vars=task_vars,
                 when=when,
