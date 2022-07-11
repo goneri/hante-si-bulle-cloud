@@ -7,15 +7,18 @@ import json
 import logging
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import ansible.plugins.loader
 import ansible.utils.collection_loader
+import pandas as pd
+import plotly.express as px
 from ansible.errors import AnsibleUndefinedVariable
+from ansible.module_utils.parsing.convert_bool import BOOLEANS_TRUE
 from ansible.parsing.dataloader import DataLoader
 from ansible.template import Templar
 from ruamel.yaml import YAML
-from ansible.module_utils.parsing.convert_bool import BOOLEANS_TRUE
 
 # NOT IMPLEMENTED
 #   - import_role, include_role and role in general
@@ -26,9 +29,9 @@ from ansible.module_utils.parsing.convert_bool import BOOLEANS_TRUE
 #   - the use of the same register name several times.
 #   - add_host and inventory
 
+reporting = []
 
 FORMAT = "%(asctime)s➤\n%(message)s"
-import datetime as dt
 
 logging.basicConfig(format=FORMAT, datefmt="%H:%M:%S")
 http_logger = logging.getLogger("aiohttp.client")
@@ -217,7 +220,6 @@ def get_args(task, module):
 async def prep_args(task, module, task_vars, task_run_id):
     args = ""
     if module in ["command", "shell"]:
-        await wait_for_requirements(task[module], task_vars, task_run_id)
         return task[module]
 
     try:
@@ -327,6 +329,8 @@ async def create_task(name, func, kwargs, task_vars=None, when=None, task_run_id
     if not isinstance(task_vars, dict):
         raise ValueError
     loop = asyncio.get_running_loop()
+    module = kwargs["module"]
+    raw_args = kwargs["task"][module]
 
     async def coro():
         if when:
@@ -339,15 +343,29 @@ async def create_task(name, func, kwargs, task_vars=None, when=None, task_run_id
             logging.debug(f"{task_run_id} ▶️ Done waiting for: {when} [{name}]")
         # Special case with assert, each line is actually a template
         if kwargs["module"] in ("assert", "ansible.builtin.assert"):
-            for l in kwargs["task"][kwargs["module"]]["that"]:
+            for l in raw_args["that"]:
                 await wait_for_requirements(
                     add_jinja_brackets(l), task_vars, task_run_id
                 )
-        if kwargs["module"] in ("debug", "ansible.builtin.debug"):
-            var = kwargs["task"][kwargs["module"]].get("var", "")
-            await wait_for_requirements(
-                add_jinja_brackets(var), task_vars, task_run_id)
+        elif kwargs["module"] in ("debug", "ansible.builtin.debug"):
+            var = raw_args.get("var", "")
+            await wait_for_requirements(add_jinja_brackets(var), task_vars, task_run_id)
+        elif module in ["command", "shell"]:
+            await wait_for_requirements(raw_args, task_vars, task_run_id)
+        else:
+            for k, v in raw_args.items():
+                await wait_for_requirements(v, task_vars, task_run_id)
+
+        start_at = datetime.now()
         _, ret = await func(**kwargs, task_run_id=task_run_id)
+        reporting.append(
+            {
+                "Taskname": task_run_id,
+                "Start": start_at,
+                "Finish": datetime.now(),
+                "Resource": f"{name} {task_run_id}",
+            }
+        )
         return ret
 
     return loop.create_task(coro())
@@ -515,3 +533,9 @@ parser.add_argument(
 args = parser.parse_args()
 logging.getLogger().setLevel(logging.DEBUG)
 asyncio.run(main(playbook_path=args.playbook_path, extra_vars=args.extra_vars))
+
+
+df = pd.DataFrame(reporting)
+
+fig = px.timeline(df, x_start="Start", x_end="Finish", y="Resource", color="Resource")
+fig.show()
