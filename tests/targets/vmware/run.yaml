@@ -1,0 +1,16 @@
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: include purge_vms
+      include_tasks: tasks/purge_vms.yaml
+    - name: include purge_libraries
+      include_tasks: tasks/purge_libraries.yaml
+    - name: include cleanup 
+      include_tasks: tasks/cleanup.yaml
+    - name: include prepare_datacenter
+      include_tasks: tasks/prepare_datacenter.yaml
+    - include_tasks: tasks/prepare_cluster.yaml
+    - include_tasks: tasks/prepare_folders.yaml
+    - include_tasks: tasks/prepare_hosts.yaml
+    - include_tasks: tasks/prepare_datastores.yaml
+    - include_tasks: tasks/prepare_guest_network.yaml

@@ -1,0 +1,14 @@
+- name: Get a list of all the datacenters
+  register: existing_datacenters
+  vmware.vmware_rest.vcenter_datacenter_info:
+- name: Force delete the existing DC
+  vmware.vmware_rest.vcenter_datacenter:
+    state: absent
+    datacenter: '{{ item.datacenter }}'
+    force: true
+  with_items: "{{ existing_datacenters.value }}"
+  when:
+    - local_libraries_are_purged
+    - sub_libraries_are_purged
+    - vm_are_purged
+  register: purge_is_done

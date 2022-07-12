@@ -1,0 +1,60 @@
+- name: Create content
+  set_fact:
+      content: "{{ lookup('password', '/dev/null chars=ascii_letters,digits,hexdigits,punctuation') }}"
+
+- name: Create local upload.txt
+  ansible.builtin.copy:
+    content: "{{ content }}"
+    dest: "{{ tmpdir.path }}/upload-{{ bucket_name }}.txt"
+  register: file_copy_result
+
+- name: stat the file
+  ansible.builtin.stat:
+    path: "{{ file_copy_result.dest }}"
+    get_checksum: yes
+  register: upload_file
+
+- name: make a bucket
+  s3_bucket:
+    name: "{{ bucket_name }}"
+    state: present
+    acl: public-read-write
+    aws_access_key: "{{ aws_access_key }}"
+    aws_secret_key: "{{ aws_secret_key }}"
+    security_token: "{{ security_token | default(omit) }}"
+    region: "{{ aws_region }}"
+  register: my_bucket
+
+- name: put a file
+  amazon.aws.aws_s3:
+    bucket: "{{ my_bucket.name }}"
+    mode: put
+    src: "{{ upload_file.stat.path }}"
+    object: file.txt
+    permission: public-read-write
+    aws_access_key: "{{ aws_access_key }}"
+    aws_secret_key: "{{ aws_secret_key }}"
+    security_token: "{{ security_token | default(omit) }}"
+    region: "{{ aws_region }}"
+  register: put_result
+
+- name: test get object
+  aws_s3:
+    bucket: "{{ my_bucket.name }}"
+    mode: get
+    dest: "{{ tmpdir.path }}/download-{{ bucket_name }}.txt"
+    object: file.txt
+  register: get_result
+  when: put_result
+
+- name: stat the file so we can compare the checksums
+  stat:
+    path: "{{ tmpdir.path }}/download-{{ bucket_name }}.txt"
+    get_checksum: yes
+  register: download_file
+  when: get_result
+
+- name: "Assert that we've got the same checksum"
+  assert:
+    that:
+      - upload_file.stat.checksum == download_file.stat.checksum

@@ -1,0 +1,48 @@
+---
+- name: Build a list of all the folders
+  vmware.vmware_rest.vcenter_folder_info:
+  register: my_folders
+  when:
+    - purge_is_done
+- name: Set my_datacenter_folder
+  ansible.builtin.set_fact:
+    my_datacenter_folder: '{{ my_folders.value|selectattr("type", "equalto", "DATACENTER")|first }}'
+  when:
+    - my_folders
+
+- name: Create datacenter my_dc
+  vmware.vmware_rest.vcenter_datacenter:
+    name: my_dc
+    folder: "{{ my_datacenter_folder.folder }}"
+  register: my_dc_info
+- ansible.builtin.debug:
+    var: my_dc_info
+- name: Assert the result has changed
+  ansible.builtin.assert:
+    that:
+      - my_dc_info
+      - my_dc_info is changed
+- name: _Create datacenter my_dc (again)
+  vmware.vmware_rest.vcenter_datacenter:
+    name: my_dc
+    folder: "{{ my_datacenter_folder.folder }}"
+  register: _result
+  when:
+    - my_dc_info
+- name: Assert the result has not changed
+  ansible.builtin.assert:
+    that:
+      - _result
+      - not(_result is changed)
+
+- name: collect a list of the datacenters
+  vmware.vmware_rest.vcenter_datacenter_info:
+  register: my_datacenters
+  when:
+    - my_dc_info
+
+- ansible.builtin.assert:
+    that:
+      - my_datacenters.value|length > 0
+  when:
+    - my_datacenters

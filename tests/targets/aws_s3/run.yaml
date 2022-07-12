@@ -1,0 +1,38 @@
+- hosts: localhost
+  vars:
+    buckets:
+      - '{{ resource_prefix | hash("md5") }}0'
+      - '{{ resource_prefix | hash("md5") }}1'
+      - '{{ resource_prefix | hash("md5") }}2'
+      - '{{ resource_prefix | hash("md5") }}3'
+      - '{{ resource_prefix | hash("md5") }}4'
+  tasks:
+#    - include_tasks: tasks/delete_bucket.yml
+#      with_items: "{{ buckets }}"
+
+    - name: get ARN of calling user
+      amazon.aws.aws_caller_info:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        security_token: "{{ security_token | default(omit) }}"
+        region: "{{ aws_region }}"
+      register: aws_caller_info
+
+    - name: register account id
+      set_fact:
+        aws_account: "{{ aws_caller_info.account }}"
+
+    - name: Create temporary directory
+      ansible.builtin.tempfile:
+        state: directory
+        path: /var/tmp
+      register: tmpdir
+
+    - include_tasks: tasks/create_bucket.yml
+      with_items: "{{ buckets }}"
+      loop_control:
+        loop_var: bucket_name
+
+#    - include_tasks: tasks/delete_bucket.yml
+#      with_items: "{{ buckets }}"
+#
