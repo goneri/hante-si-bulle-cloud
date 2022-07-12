@@ -26,8 +26,10 @@ from ruamel.yaml import YAML
 #   - include_vars
 #   - retries condition
 #   - ignore_errors
-#   - the use of the same register name several times.
-#   - add_host and inventory
+#   - add_host and inventory, everything is currently run locally
+#   - inline argument passing, e.g: - debug: var=foo
+#   - error managment in general
+#   - and more, yours to discover!
 
 reporting = []
 
@@ -67,12 +69,6 @@ def load_module(module_name):
     pymod = importlib.util.module_from_spec(spec)
     sys.modules[internal_module_name] = pymod
     spec.loader.exec_module(pymod)
-    print(
-        f'  - module_utils: {sys.modules["ansible_collections.vmware.vmware_rest.plugins.module_utils.vmware_rest"]}'
-    )
-    print(
-        f'  - module_utils: {id(sys.modules["ansible_collections.vmware.vmware_rest.plugins.module_utils.vmware_rest"])}'
-    )
     return pymod
 
 
@@ -95,7 +91,6 @@ def find_undef_variable_in_jinja(jinja, task_vars, task_run_id):
     except AnsibleUndefinedVariable as e:
         if str(e).startswith("'"):
             if "has no attribute" in str(e):
-                from pprint import pprint
 
                 print(f"{task_run_id} ⚠️jinja: {jinja}: {e}")
                 return
@@ -124,7 +119,7 @@ async def evaluate_jinja2(jinja2_str, task_vars, task_run_id):
     return templar.template(jinja2_str)
 
 
-def expand_jinja2_from_args(args, task_vars):
+async def expand_jinja2_from_args(args, task_vars, task_run_id):
     loader = DataLoader()
 
     vars_no_pending_task = {
@@ -140,8 +135,9 @@ def expand_jinja2_from_args(args, task_vars):
 
     for k, v in args.items():
         if isinstance(v, dict):
-            args[k] = expand_jinja2_from_args(v, task_vars)
+            args[k] = await expand_jinja2_from_args(v, task_vars, task_run_id)
         elif isinstance(v, str):
+            await wait_for_requirements(v, task_vars, task_run_id)
             args[k] = templar.template(v)
         else:
             pass
@@ -157,13 +153,13 @@ async def wait_for_requirements(jinja, task_vars, task_run_id):
             return
         logging.debug(f"{task_run_id} Waiting for {var_name} because of {jinja}")
         try:
-            await task_vars[var_name]
+            v = await task_vars[var_name]
         except KeyError:
             logging.debug(
                 f"{task_run_id} var {var_name} not found in {task_vars.keys()}"
             )
             raise
-        print(f"{task_run_id} ✅ {var_name} var is ready")
+        print(f"{task_run_id} ✅ {var_name} var is ready v={v}")
         await asyncio.sleep(0.01)
 
 
@@ -175,6 +171,7 @@ def task_module_name(task):
                 "delay",
                 "delegate_to",
                 "ignore_errors",
+                "loop",
                 "loop_control",
                 "name",
                 "no_log",
@@ -199,15 +196,7 @@ def expander(v):
 
 def get_args(task, module):
     if isinstance(task[module], str):
-        task_args = {}
-        if "=" in task[module]:
-            for i in task[module].split(" "):
-                try:
-                    k, v = i.split("=")
-                    task_args[k] = v
-                except ValueError as e:
-                    raise Exception(f"{e} -- {i}")
-        return task_args
+        raise ValueError("Inline argument passing like 'foo: a=b' is not supported")
     elif task[module]:
         as_dict = json.loads(json.dumps(task[module]))
         if not isinstance(as_dict, dict):
@@ -246,8 +235,12 @@ async def run_ansible(cmd_args, task_run_id):
     # NOTE: output is a JSON structure but the first line starts with a status
     # prefix
     logging.debug(f"{task_run_id}✨ {cmd_args}")
-    logging.debug("\n".join([f"{task_run_id} 📌 {l}" for l in raw_output.split("\n")]))
-    likely_json = raw_output.split(" => ", maxsplit=1)[1]
+    logging.debug("\n".join([f"{task_run_id} 📌 {i}" for i in raw_output.split("\n")]))
+    try:
+        likely_json = raw_output.split(" => ", maxsplit=1)[1]
+    except IndexError:
+        logging.error(f"{task_run_id}⚠️ Unexpected output from ansible: {raw_output}")
+        raise
     try:
         output = json.loads(likely_json)
         assert isinstance(output, dict)
@@ -294,8 +287,7 @@ async def run_task(task, module=None, task_vars=None, task_run_id=None):
         "localhost",
     ]
     output = await run_ansible(cmd_args, task_run_id)
-    # tmp_file.unlink()
-    return None, output
+    return output
 
 
 def import_tasks_file(task_file, task_vars):
@@ -322,48 +314,86 @@ def add_jinja_brackets(input):
         return "{{" + input + "}}"
 
 
-async def create_task(name, func, kwargs, task_vars=None, when=None, task_run_id=None):
+async def homemade_assert(that, task_vars, task_run_id):
+    # TODO: use Ansible's ./lib/ansible/plugins/action/assert.py
+    if isinstance(that, str):
+        conditions = [that]
+    elif isinstance(that, list):
+        conditions = that
+    else:
+        raise ValueError
+
+    for c in conditions:
+        result = await evaluate_jinja2(add_jinja_brackets(c), task_vars, task_run_id)
+        if not result:
+            logging.info(f"{task_run_id} Assert has failed!: {c}")
+            return {
+                "assertion": c,
+                "changed": False,
+                "evaluated_to": False,
+                "msg": "Assertion failed",
+            }
+        logging.info(f"{task_run_id} Assert success: {c}")
+    return {"assertion": c, "changed": False, "msg": "All assertions passed"}
+
+
+async def homemade_debug(var, task_vars, task_run_id):
+    assert isinstance(var, str)
+    result = await evaluate_jinja2(add_jinja_brackets(var), task_vars, task_run_id)
+    logging.info(f"{task_run_id} debug/var: {var}={result}")
+
+
+async def create_task(
+    task, module, task_name, func, kwargs, task_vars=None, when=None, task_run_id=None
+):
     assert task_run_id
     if not isinstance(kwargs, dict):
         raise ValueError
     if not isinstance(task_vars, dict):
         raise ValueError
     loop = asyncio.get_running_loop()
-    module = kwargs["module"]
-    raw_args = kwargs["task"][module]
+    raw_args = task.get(module) or {}
+    if isinstance(raw_args, str):
+        raise ValueError("Inline argument passing like 'foo: a=b' is not supported")
 
     async def coro():
         if when:
             logging.debug(
-                f"{task_run_id} ⏸️ Waiting for when condition: {when} [{name}]"
+                f"{task_run_id} ⏸️ Waiting for when condition: {when} [{task_name}]"
             )
             await wait_for_requirements(
                 add_jinja_brackets(when), task_vars, task_run_id
             )
-            logging.debug(f"{task_run_id} ▶️ Done waiting for: {when} [{name}]")
+            logging.debug(f"{task_run_id} ▶️ Done waiting for: {when} [{task_name}]")
         # Special case with assert, each line is actually a template
-        if kwargs["module"] in ("assert", "ansible.builtin.assert"):
-            for l in raw_args["that"]:
+        if module in ("assert", "ansible.builtin.assert"):
+            for i in raw_args["that"]:
                 await wait_for_requirements(
-                    add_jinja_brackets(l), task_vars, task_run_id
+                    add_jinja_brackets(i), task_vars, task_run_id
                 )
-        elif kwargs["module"] in ("debug", "ansible.builtin.debug"):
+        elif module in ("debug", "ansible.builtin.debug"):
             var = raw_args.get("var", "")
             await wait_for_requirements(add_jinja_brackets(var), task_vars, task_run_id)
         elif module in ["command", "shell"]:
             await wait_for_requirements(raw_args, task_vars, task_run_id)
         else:
             for k, v in raw_args.items():
-                await wait_for_requirements(v, task_vars, task_run_id)
+                a = await wait_for_requirements(v, task_vars, task_run_id)
+
+        # async module
+        if "params" in kwargs:
+            for k, v in kwargs["params"].items():
+                kwargs["params"][k] = await evaluate_jinja2(v, task_vars, task_run_id)
 
         start_at = datetime.now()
-        _, ret = await func(**kwargs, task_run_id=task_run_id)
+
+        ret = await func(**kwargs)
         reporting.append(
             {
                 "Taskname": task_run_id,
                 "Start": start_at,
                 "Finish": datetime.now(),
-                "Resource": f"{name} {task_run_id}",
+                "Resource": f"{task_name} {task_run_id}",
             }
         )
         return ret
@@ -371,7 +401,7 @@ async def create_task(name, func, kwargs, task_vars=None, when=None, task_run_id
     return loop.create_task(coro())
 
 
-async def expand_loops(task, task_vars, task_run_id):
+async def expand_loops(task, task_vars, scoped_vars, task_run_id):
     match task:
         case {"with_items": _}:
             loop_keyword = "with_items"
@@ -398,6 +428,13 @@ async def expand_loops(task, task_vars, task_run_id):
             logging.info(f"{task_run_id} item: {item}")
             cloned_task["vars"][loop_var] = item
             new_tasks.append(cloned_task)
+        else:
+            if "register" in task:
+                scoped_vars[task["register"]] = {
+                    "changed": False,
+                    "skipped_reason": "No items in the list",
+                }
+
     else:
         logging.error(f"items not a list: ¨{items}¨")
         raise ValueError(f"items not a list: {items}")
@@ -415,12 +452,13 @@ async def run_playbook(playbook, extra_vars=None):
         task_run_id = random_emojis()
         task, *tasks_stack = tasks_stack
         task_vars = extra_vars | scoped_vars.copy() | task.get("vars", {})
-        task_name = task.get("name", "noname")
         module = task_module_name(task)
+        task_name = task.get("name", f"calling {module}")
+        when = task.get("when")
 
         try:
-            new_tasks = await expand_loops(task, task_vars, task_run_id)
-            if new_tasks:
+            new_tasks = await expand_loops(task, task_vars, scoped_vars, task_run_id)
+            if new_tasks is not None:
                 tasks_stack = new_tasks + tasks_stack
                 continue
 
@@ -446,9 +484,22 @@ async def run_playbook(playbook, extra_vars=None):
             args = get_args(task, module)
             if module in ("set_fact", "ansible.builtin.set_fact"):
                 for k, v in args.items():
-                    scoped_vars[k] = loop.create_task(
-                        evaluate_jinja2(v, task_vars, task_run_id)
+                    t = await create_task(
+                        task,
+                        module,
+                        task_name,
+                        evaluate_jinja2,
+                        kwargs={
+                            "jinja2_str": v,
+                            "task_vars": task_vars,
+                            "task_run_id": task_run_id,
+                        },
+                        task_vars=task_vars,
+                        when=when,
+                        task_run_id=task_run_id,
                     )
+                    tl.append(t)
+                    scoped_vars[k] = t
                 continue
             if module in ("pause", "ansible.builtin.pause"):
                 seconds = task.get("seconds", 0)
@@ -459,17 +510,13 @@ async def run_playbook(playbook, extra_vars=None):
                     scoped_vars[task["register"]] = t
                 continue
 
-            when = task.get("when")
             logging.info(f"{task_run_id}🎬 starting task: {task_name}")
             if module.startswith("vmware.vmware_rest"):
                 pymod = load_module(module)
-                params = task[module] or {}
-
-                for v in args.values():
-                    await wait_for_requirements(v, task_vars, task_run_id)
-                args = expand_jinja2_from_args(args, task_vars)
 
                 t = await create_task(
+                    task,
+                    module,
                     task_name,
                     pymod.amain,
                     kwargs={"params": args},
@@ -477,18 +524,54 @@ async def run_playbook(playbook, extra_vars=None):
                     when=when,
                     task_run_id=task_run_id,
                 )
+            elif module in ("assert", "ansible.builtin.assert"):
+                t = await create_task(
+                    task,
+                    module,
+                    task_name,
+                    homemade_assert,
+                    kwargs={
+                        "that": args["that"],
+                        "task_vars": task_vars,
+                        "task_run_id": task_run_id,
+                    },
+                    task_vars=task_vars,
+                    when=when,
+                    task_run_id=task_run_id,
+                )
+            elif module in ("debug", "ansible.builtin.debug"):
+                t = await create_task(
+                    task,
+                    module,
+                    task_name,
+                    homemade_debug,
+                    kwargs={
+                        "var": args["var"],
+                        "task_vars": task_vars,
+                        "task_run_id": task_run_id,
+                    },
+                    task_vars=task_vars,
+                    when=when,
+                    task_run_id=task_run_id,
+                )
             else:
                 t = await create_task(
+                    task,
+                    module,
                     task_name,
                     run_task,
-                    kwargs={"task": task, "module": module, "task_vars": task_vars},
+                    kwargs={
+                        "task": task,
+                        "module": module,
+                        "task_vars": task_vars,
+                        "task_run_id": task_run_id,
+                    },
                     task_vars=task_vars,
                     when=when,
                     task_run_id=task_run_id,
                 )
             tl.append(t)
             if "register" in task:
-                print(f"{task_run_id} register: {task['register']} for {task_name}")
                 scoped_vars[task["register"]] = t
         except AnsibleUndefinedVariable:
             if task.get("ignore_errors") not in BOOLEANS_TRUE:
